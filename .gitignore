@@ -1,0 +1,32 @@
+# Build outputs
+/bin/
+/scaleblade
+/scaleblade-mcp
+*.exe
+*.test
+/dist/
+coverage.out
+coverage.html
+
+# Credentials and captures -- never commit these
+cookies.json
+**/cookies.json
+*.cookie
+*.cookies
+.env
+.env.*
+!.env.example
+captures/
+evidence/
+*.har
+*.pcap
+*.pcapng
+*.saz
+*.hurl
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
