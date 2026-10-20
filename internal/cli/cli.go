@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -48,6 +49,29 @@ func usagef(format string, args ...any) error {
 	return usageError{msg: fmt.Sprintf(format, args...)}
 }
 
+// Process exit codes. Codes 3 and 4 exist so cron jobs and the fleet harness
+// can tell an expired browser session and a stalled provider task apart from a
+// generic API or network failure.
+const (
+	exitGeneral         = 1
+	exitUsage           = 2
+	exitUnauthenticated = 3
+	exitStalled         = 4
+)
+
+// authError wraps a failure that means the session must be refreshed by a
+// human. It never carries cookie values.
+type authError struct{ err error }
+
+func (e authError) Error() string { return e.err.Error() }
+func (e authError) Unwrap() error { return e.err }
+
+// stalledError reports at least one provider task that has made no progress
+// inside the caller's threshold.
+type stalledError struct{ msg string }
+
+func (e stalledError) Error() string { return e.msg }
+
 func (a *App) run(ctx context.Context, args []string) int {
 	g, rest, err := parseGlobals(args)
 	if err != nil {
@@ -65,6 +89,10 @@ func (a *App) run(ctx context.Context, args []string) int {
 		fmt.Fprint(a.Out, usageText)
 		return 0
 	}
+	if rest[0] == "version" {
+		fmt.Fprintf(a.Out, "scaleblade %s\n", a.Ver)
+		return 0
+	}
 	if err := a.dispatch(ctx, g, rest); err != nil {
 		return a.fail(err)
 	}
@@ -76,15 +104,24 @@ func (a *App) fail(err error) int {
 	if errors.As(err, &ue) {
 		fmt.Fprintf(a.Err, "scaleblade: %v\n", err)
 		fmt.Fprintln(a.Err, "run 'scaleblade help' for usage")
-		return 2
+		return exitUsage
 	}
-	if errors.Is(err, api.ErrNoCredentials) {
+	var se stalledError
+	if errors.As(err, &se) {
 		fmt.Fprintf(a.Err, "scaleblade: %v\n", err)
-		fmt.Fprintln(a.Err, "cookie values are never printed; see README.md for extraction")
-		return 1
+		return exitStalled
+	}
+	var ae authError
+	var apiErr *api.APIError
+	if errors.As(err, &ae) ||
+		errors.Is(err, api.ErrNoCredentials) ||
+		(errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized) {
+		fmt.Fprintf(a.Err, "scaleblade: %v\n", err)
+		fmt.Fprintln(a.Err, "session must be refreshed: sign in at https://my.scaleblade.com and rewrite the cookie file (see README.md)")
+		return exitUnauthenticated
 	}
 	fmt.Fprintf(a.Err, "scaleblade: %v\n", err)
-	return 1
+	return exitGeneral
 }
 
 func (a *App) dispatch(ctx context.Context, g globals, rest []string) error {
@@ -316,6 +353,7 @@ Usage:
 
 Commands:
   auth me                     Show the current session (GET /v1/auth/me)
+  auth check                  Verify the session for scripts; exit 3 when stale
   projects list               List projects (GET /v1/portal/projects)
   projects get <id>           Show one project
   compute list                List bare-metal servers (needs --project)
@@ -332,7 +370,7 @@ Commands:
   billing                     Show invoices, subscriptions and credit
   billing invoices            List invoices
   tickets                     List support tickets
-  tasks                       List long-running tasks
+  tasks [--stuck 20m]         List tasks; exit 4 when a task has stopped moving
   request <GET /v1/path>      Perform one read-only GET request
   help                        Show this help
   version                     Print the version
