@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -17,23 +19,50 @@ func (a *App) cmdAuth(ctx context.Context, g globals, args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(pos) > 1 || (len(pos) == 1 && pos[0] != "me") {
-		return usagef("usage: scaleblade auth me")
+	sub := "me"
+	if len(pos) > 0 {
+		sub, pos = pos[0], pos[1:]
+	}
+	if len(pos) != 0 || (sub != "me" && sub != "check") {
+		return usagef("usage: scaleblade auth me | auth check [--json]")
 	}
 	c, err := a.client(g)
 	if err != nil {
+		if sub == "check" {
+			return a.reportAuthFailure(g, err)
+		}
 		return err
 	}
 	raw, err := c.GetRaw(ctx, "/v1/auth/me", "")
 	if err != nil {
+		if sub == "check" {
+			return a.reportAuthFailure(g, err)
+		}
 		return err
 	}
 	if g.jsonOut {
+		if sub == "check" {
+			var me api.Me
+			if err := decodeData(raw, &me); err != nil {
+				return err
+			}
+			return a.printJSON(authStatus(me, c, true))
+		}
 		return a.printRaw(raw)
 	}
 	var me api.Me
 	if err := decodeData(raw, &me); err != nil {
 		return err
+	}
+	if sub == "check" {
+		pairs := [][2]string{
+			{"Status", "ok"},
+			{"Role", dash(me.Role)},
+			{"Session expires", dash(me.ExpiresAt)},
+			{"Remaining", remainingTime(me.ExpiresAt)},
+			{"Credentials", c.CredentialSource()},
+		}
+		return writeKV(a.Out, pairs)
 	}
 	return writeKV(a.Out, [][2]string{
 		{"Role", dash(me.Role)},
@@ -43,6 +72,55 @@ func (a *App) cmdAuth(ctx context.Context, g globals, args []string) error {
 		{"Session expires", dash(me.ExpiresAt)},
 		{"Credentials", c.CredentialSource()},
 	})
+}
+
+// authStatus is the machine-readable shape of `auth check`. It contains no
+// cookie values, only their source description.
+func authStatus(me api.Me, c *api.Client, ok bool) map[string]any {
+	st := map[string]any{
+		"authenticated": ok,
+		"role":          me.Role,
+		"expires_at":    me.ExpiresAt,
+		"remaining":     remainingTime(me.ExpiresAt),
+	}
+	if c != nil {
+		st["credentials"] = c.CredentialSource()
+	}
+	return st
+}
+
+// reportAuthFailure classifies a failed session probe. HTTP 401 and any
+// credential-resolution error mean a human must refresh the cookie file; other
+// failures stay generic so a network outage is not mistaken for an expired
+// session.
+func (a *App) reportAuthFailure(g globals, err error) error {
+	var apiErr *api.APIError
+	expired := errors.Is(err, api.ErrNoCredentials) ||
+		(errors.As(err, &apiErr) && apiErr.Status == http.StatusUnauthorized)
+	if !expired {
+		return err
+	}
+	if g.jsonOut {
+		st := map[string]any{"authenticated": false, "reason": err.Error()}
+		if werr := a.printJSON(st); werr != nil {
+			return werr
+		}
+	}
+	return authError{err: err}
+}
+
+// remainingTime renders the gap to an RFC 3339 timestamp, or "-" when the
+// timestamp is missing or unparseable.
+func remainingTime(ts string) string {
+	t, err := parseAPITime(ts)
+	if err != nil {
+		return "-"
+	}
+	d := time.Until(t)
+	if d <= 0 {
+		return "expired"
+	}
+	return d.Round(time.Minute).String()
 }
 
 func (a *App) cmdProjects(ctx context.Context, g globals, args []string) error {
@@ -662,12 +740,21 @@ func (a *App) cmdTickets(ctx context.Context, g globals, args []string) error {
 }
 
 func (a *App) cmdTasks(ctx context.Context, g globals, args []string) error {
-	pos, err := parseCommand(args, nil, nil)
+	var stuckFor string
+	pos, err := parseCommand(args, map[string]*string{"stuck": &stuckFor}, nil)
 	if err != nil {
 		return err
 	}
 	if len(pos) != 0 {
-		return usagef("usage: scaleblade tasks")
+		return usagef("usage: scaleblade tasks [--stuck 20m]")
+	}
+	var threshold time.Duration
+	if stuckFor != "" {
+		d, parseErr := time.ParseDuration(stuckFor)
+		if parseErr != nil || d <= 0 {
+			return usagef("invalid --stuck %q (use a duration such as 20m or 1h)", stuckFor)
+		}
+		threshold = d
 	}
 	c, err := a.client(g)
 	if err != nil {
@@ -678,7 +765,19 @@ func (a *App) cmdTasks(ctx context.Context, g globals, args []string) error {
 		return err
 	}
 	if g.jsonOut {
-		return a.printRaw(raw)
+		if err := a.printRaw(raw); err != nil {
+			return err
+		}
+		if threshold > 0 {
+			var tasks []api.Task
+			if err := decodeData(raw, &tasks); err != nil {
+				return err
+			}
+			if stalled := stalledTasks(tasks, threshold); len(stalled) > 0 {
+				return stalledError{msg: stalledSummary(stalled, threshold)}
+			}
+		}
+		return nil
 	}
 	var tasks []api.Task
 	if err := decodeData(raw, &tasks); err != nil {
@@ -692,7 +791,107 @@ func (a *App) cmdTasks(ctx context.Context, g globals, args []string) error {
 			fmt.Sprintf("%.0f%%", t.Progress), dash(resource), dash(t.UpdatedAt),
 		})
 	}
-	return writeTable(a.Out, []string{"ID", "TYPE", "STATE", "PROGRESS", "RESOURCE", "UPDATED"}, rows)
+	if err := writeTable(a.Out, []string{"ID", "TYPE", "STATE", "PROGRESS", "RESOURCE", "UPDATED"}, rows); err != nil {
+		return err
+	}
+	if threshold == 0 {
+		return nil
+	}
+	stalled := stalledTasks(tasks, threshold)
+	if len(stalled) == 0 {
+		fmt.Fprintf(a.Out, "\nno task has been in flight for more than %s\n", threshold)
+		return nil
+	}
+	fmt.Fprintf(a.Out, "\nno progress for more than %s:\n", threshold)
+	detail := make([][]string, 0, len(stalled))
+	for _, t := range stalled {
+		detail = append(detail, []string{
+			dash(t.DisplayID), dash(t.Type), dash(t.State),
+			fmt.Sprintf("%.0f%%", t.Progress), dash(t.UpdatedAt), stalledFor(t),
+		})
+	}
+	if err := writeTable(a.Out, []string{"ID", "TYPE", "STATE", "PROGRESS", "UPDATED", "IDLE"}, detail); err != nil {
+		return err
+	}
+	return stalledError{msg: stalledSummary(stalled, threshold)}
+}
+
+// terminalTaskStates are the states in which a provider task cannot progress
+// any further. Any other state counts as in flight, so an unrecognised state
+// is reported rather than silently ignored.
+var terminalTaskStates = map[string]bool{
+	"succeeded":  true,
+	"success":    true,
+	"completed":  true,
+	"complete":   true,
+	"failed":     true,
+	"error":      true,
+	"cancelled":  true,
+	"canceled":   true,
+	"timed_out":  true,
+	"timedout":   true,
+	"expired":    true,
+	"archived":   true,
+	"superseded": true,
+}
+
+// stalledTasks returns in-flight tasks whose updated_at is older than the
+// threshold. Tasks without a parseable timestamp are left out: guessing would
+// produce false alarms.
+func stalledTasks(tasks []api.Task, threshold time.Duration) []api.Task {
+	now := time.Now()
+	var out []api.Task
+	for _, t := range tasks {
+		if terminalTaskStates[strings.ToLower(strings.TrimSpace(t.State))] {
+			continue
+		}
+		ts, err := parseAPITime(t.UpdatedAt)
+		if err != nil {
+			continue
+		}
+		if now.Sub(ts) > threshold {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func stalledFor(t api.Task) string {
+	ts, err := parseAPITime(t.UpdatedAt)
+	if err != nil {
+		return "-"
+	}
+	return time.Since(ts).Round(time.Minute).String()
+}
+
+func stalledSummary(stalled []api.Task, threshold time.Duration) string {
+	// Report the longest idle: the earliest updated_at among the stalled tasks.
+	oldest, parseErr := parseAPITime(stalled[0].UpdatedAt)
+	for _, t := range stalled[1:] {
+		if ts, err := parseAPITime(t.UpdatedAt); err == nil && ts.Before(oldest) {
+			oldest = ts
+		}
+	}
+	msg := fmt.Sprintf("%d provider task(s) made no progress for more than %s", len(stalled), threshold)
+	if parseErr == nil {
+		msg += fmt.Sprintf("; longest idle %s", time.Since(oldest).Round(time.Minute))
+	}
+	return msg
+}
+
+// parseAPITime accepts the RFC 3339 variants the portal emits, with or without
+// fractional seconds.
+func parseAPITime(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, errors.New("empty timestamp")
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05.999999999Z0700"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("cannot parse timestamp %q", s)
 }
 
 func (a *App) cmdRequest(ctx context.Context, g globals, args []string) error {

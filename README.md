@@ -106,13 +106,17 @@ want to end the session.
 
 Sessions expire. When the portal returns HTTP 401 with code `unauthorized`, sign
 in again in the browser and refresh `cookies.json`. The tools report the API
-status; they do not attempt to reuse or refresh credentials.
+status; they do not attempt to reuse or refresh credentials. `scaleblade auth
+check` makes that state explicit for scripts (exit 3) and prints the remaining
+session time; the refresh procedure is in
+[docs/recovery.md](docs/recovery.md#2-is-the-portal-session-still-valid).
 
 ## CLI usage
 
 ```bash
 # Session and projects
 scaleblade auth me
+scaleblade auth check          # exit 3 when the browser session must be refreshed
 scaleblade projects list
 scaleblade projects get <project-id>
 
@@ -134,6 +138,7 @@ scaleblade billing
 scaleblade billing invoices
 scaleblade tickets
 scaleblade tasks
+scaleblade tasks --stuck 20m    # exit 4 when a task has made no progress for 20m
 
 # One read-only GET against any /v1 path
 scaleblade request /v1/portal/tasks --project <project-id>
@@ -163,8 +168,15 @@ keeps this surface behind two independent gates.
 | Code | Meaning |
 | --- | --- |
 | 0 | Success. |
-| 1 | API, network, credential or decode error. |
+| 1 | API, network or decode error. |
 | 2 | Usage error (bad flag, missing `--project`, missing `--yes`). |
+| 3 | Not authenticated: missing, unreadable or expired session. A human must refresh `cookies.json`. |
+| 4 | `tasks --stuck` found a provider task that stopped moving. |
+
+Codes 3 and 4 exist so cron, a systemd timer or the fleet harness can react
+without parsing human text. A stale browser session is the most common failure:
+`auth check` reports it as 3 and every other command does the same rather than
+surfacing a bare `401`. See [docs/recovery.md](docs/recovery.md).
 
 ## MCP server
 
@@ -262,6 +274,8 @@ docs/                  API catalogue, methodology, REA notes
 - [docs/notes.md](docs/notes.md) — methodology, Cloudflare, roles, rate limits,
   risks, provenance.
 - [docs/rea.md](docs/rea.md) — REA browser-capture setup and its result.
+- [docs/recovery.md](docs/recovery.md) — health ladder, cookie refresh, stalled
+  provider tasks, rebuild and backup/restore runbook.
 - [SECURITY.md](SECURITY.md) — credential handling and vulnerability reporting.
 - [DISCLAIMER.md](DISCLAIMER.md) — legal/usage disclaimer.
 
