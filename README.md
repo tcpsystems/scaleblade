@@ -1,7 +1,6 @@
 # scaleblade
 
-**Unofficial, reverse-engineered CLI and MCP server for the Scaleblade provider
-portal API.**
+**Unofficial CLI and MCP server for the Scaleblade provider portal API.**
 
 > **Disclaimer.** This project is not affiliated with, endorsed by, or supported
 > by Scaleblade. The API it uses is undocumented and was reconstructed by
@@ -173,7 +172,7 @@ keeps this surface behind two independent gates.
 | 3 | Not authenticated: missing, unreadable or expired session. A human must refresh `cookies.json`. |
 | 4 | `tasks --stuck` found a provider task that stopped moving. |
 
-Codes 3 and 4 exist so cron, a systemd timer or the fleet harness can react
+Codes 3 and 4 exist so cron, a systemd timer or other automation can react
 without parsing human text. A stale browser session is the most common failure:
 `auth check` reports it as 3 and every other command does the same rather than
 surfacing a bare `401`. See [docs/recovery.md](docs/recovery.md).
@@ -278,6 +277,7 @@ docs/                  API catalogue, methodology, REA notes
   provider tasks, rebuild and backup/restore runbook.
 - [SECURITY.md](SECURITY.md) — credential handling and vulnerability reporting.
 - [DISCLAIMER.md](DISCLAIMER.md) — legal/usage disclaimer.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — how to contribute to this project.
 
 ## License
 
