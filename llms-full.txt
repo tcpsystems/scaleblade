@@ -1,0 +1,18 @@
+# tcpsystems/scaleblade — Complete LLM Reference
+
+> Dependency-free Go client library, CLI (`cmd/scaleblade`), and Model Context Protocol server (`cmd/scaleblade-mcp`) for the Scaleblade portal (`github.com/tcpsystems/scaleblade`).
+
+## Architecture & Packages
+
+1. **`cmd/scaleblade` & `internal/cli`**:
+   - Command-line interface supporting JSON/table output, account inspection, service listing, server lifecycle control, and diagnostics.
+2. **`cmd/scaleblade-mcp` & `internal/mcp`**:
+   - Zero-dependency Model Context Protocol (MCP) server over stdio speaking JSON-RPC 2.0, exposing Scaleblade tools to AI agents without leaking raw API tokens into agent prompts.
+3. **`internal/api`**:
+   - Typed HTTP client with context deadlines, structured error decoding, retry/backoff handling, and bearer authentication.
+4. **`internal/buildinfo`**:
+   - Linker-injected version, commit SHA, and build timestamp metadata shared by the CLI and MCP server.
+
+## Quality & Security Invariants
+- Zero third-party dependencies in `go.mod`; builds with `CGO_ENABLED=0`.
+- Verified via `go vet ./...`, `go test -race ./...`, `staticcheck ./...`, and `govulncheck ./...`.
