@@ -1,0 +1,9 @@
+# tcpsystems/scaleblade
+
+> Dependency-free Go CLI (`scaleblade`) and Model Context Protocol server (`scaleblade-mcp`) for the Scaleblade portal API.
+
+## Core Rules
+- Pure Go standard library (`go.mod` has zero external dependencies, `CGO_ENABLED=0`)
+- Dual entry points: `cmd/scaleblade` (CLI) and `cmd/scaleblade-mcp` (JSON-RPC 2.0 MCP server over stdio)
+- Internal packages: `internal/api`, `internal/cli`, `internal/mcp`, `internal/buildinfo`
+- Operating Rules: [AGENTS.md](AGENTS.md), [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md)
